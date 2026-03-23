@@ -1,5 +1,5 @@
 """
-OTel Observability Agent - AI-powered observability for Kubernetes workloads.
+DeepRoot AI - AI-powered observability agent for Kubernetes workloads.
 
 Ingests OpenTelemetry logs & traces from otel-collector, stores in Elasticsearch,
 and provides a natural language query interface powered by Ollama/Mistral for
@@ -29,9 +29,9 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL), format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("otel-agent")
+logger = logging.getLogger("deeproot-ai")
 
-app = FastAPI(title="OTel Observability Agent", version="1.0.0")
+app = FastAPI(title="DeepRoot AI", version="1.0.0", description="AI-powered observability agent")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -109,28 +109,64 @@ class ESClient:
             return {"status": "unreachable", "error": str(e)}
 
     async def ensure_index(self, index: str, mapping: dict):
+        """Create index if it doesn't exist. Retries up to 3 times on connection failure."""
+        for attempt in range(3):
+            try:
+                r = await self.client.head(f"{self.host}/{index}")
+                if r.status_code == 404:
+                    r = await self.client.put(
+                        f"{self.host}/{index}",
+                        json=mapping,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if r.status_code in (200, 201):
+                        logger.info(f"✅ Created index '{index}' successfully")
+                    else:
+                        logger.error(f"❌ Failed to create index '{index}': {r.status_code} {r.text}")
+                elif r.status_code == 200:
+                    logger.info(f"✅ Index '{index}' already exists")
+                    # Verify doc count
+                    count_r = await self.client.get(f"{self.host}/{index}/_count")
+                    if count_r.status_code == 200:
+                        doc_count = count_r.json().get("count", 0)
+                        logger.info(f"   Index '{index}' has {doc_count} documents")
+                return
+            except Exception as e:
+                logger.warning(f"ES connection attempt {attempt+1}/3 for index '{index}': {e}")
+                if attempt < 2:
+                    import asyncio
+                    await asyncio.sleep(5)
+        logger.error(f"❌ Failed to ensure index '{index}' after 3 attempts")
+
+    async def index_count(self, index: str) -> int:
+        """Get document count for an index."""
         try:
-            r = await self.client.head(f"{self.host}/{index}")
-            if r.status_code == 404:
-                r = await self.client.put(
-                    f"{self.host}/{index}",
-                    json=mapping,
-                    headers={"Content-Type": "application/json"},
-                )
-                logger.info(f"Created index '{index}': {r.status_code}")
-            else:
-                logger.info(f"Index '{index}' already exists.")
-        except Exception as e:
-            logger.error(f"Failed to ensure index '{index}': {e}")
+            r = await self.client.get(
+                f"{self.host}/{index}/_count",
+                headers={"Content-Type": "application/json"},
+            )
+            return r.json().get("count", 0)
+        except Exception:
+            return 0
 
     async def search(self, index: str, query: dict, size: int = 100) -> dict:
         try:
+            body = {"query": query, "size": size}
+            # Only add sort if timestamp field exists in query context
+            body["sort"] = [{"timestamp": {"order": "desc", "unmapped_type": "date"}}]
             r = await self.client.post(
                 f"{self.host}/{index}/_search",
-                json={"query": query, "size": size, "sort": [{"timestamp": {"order": "desc"}}]},
+                json=body,
                 headers={"Content-Type": "application/json"},
             )
-            return r.json()
+            result = r.json()
+            # Log for debugging
+            hit_count = result.get("hits", {}).get("total", {}).get("value", 0)
+            logger.debug(f"Search on '{index}': {hit_count} hits")
+            if r.status_code != 200:
+                logger.error(f"ES search error on '{index}': {r.status_code} - {r.text[:500]}")
+                return {"hits": {"hits": [], "total": {"value": 0}}}
+            return result
         except Exception as e:
             logger.error(f"ES search failed on '{index}': {e}")
             return {"hits": {"hits": [], "total": {"value": 0}}}
@@ -356,11 +392,17 @@ User query: "{query}"
 Respond ONLY with valid JSON (no markdown, no explanation):
 {{
   "service_name": "<service name or empty string if not specified>",
-  "query_type": "<one of: anomaly_detection, slowness, errors, logs, traces, rca, general>",
-  "time_range_minutes": <integer, default 60>,
+  "query_type": "<one of: anomaly_detection, slowness, errors, logs, traces, rca, general, browse>",
+  "time_range_minutes": <integer, default 1440 for general queries, 60 for specific incidents, 0 means search ALL data with no time filter>,
   "severity_filter": "<ERROR, WARN, or empty string>",
   "keywords": ["<relevant search terms>"]
-}}"""
+}}
+
+IMPORTANT RULES:
+- If the user asks to "show all", "list", "what data", "show me logs", "show me traces" or any browsing query, set query_type to "browse" and time_range_minutes to 0.
+- If the user doesn't mention a specific time window, use time_range_minutes: 1440 (24 hours).
+- If the user says "all data" or "everything", set time_range_minutes to 0 (no time filter).
+- For service_name, use the EXACT service name as the user mentions it (e.g. "user-management-service", not "user management")."""
         raw = await self.ask_llm(prompt)
         try:
             # Try to extract JSON from response
@@ -369,22 +411,24 @@ Respond ONLY with valid JSON (no markdown, no explanation):
                 return json.loads(json_match.group())
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse intent JSON: {raw}")
-        # Fallback
+        # Fallback — use wide time range
         return {
             "service_name": "",
             "query_type": "general",
-            "time_range_minutes": 60,
+            "time_range_minutes": 1440,
             "severity_filter": "",
             "keywords": query.lower().split()[:5],
         }
 
     async def _query_logs(self, intent: dict) -> dict:
         must_clauses = []
-        time_range = intent.get("time_range_minutes", 60)
-        now = datetime.now(timezone.utc)
-        from_time = (now - timedelta(minutes=time_range)).isoformat()
+        time_range = intent.get("time_range_minutes", 1440)
 
-        must_clauses.append({"range": {"timestamp": {"gte": from_time, "lte": now.isoformat()}}})
+        # time_range_minutes=0 means no time filter (search ALL data)
+        if time_range > 0:
+            now = datetime.now(timezone.utc)
+            from_time = (now - timedelta(minutes=time_range)).isoformat()
+            must_clauses.append({"range": {"timestamp": {"gte": from_time, "lte": now.isoformat()}}})
 
         if intent.get("service_name"):
             must_clauses.append({"term": {"service_name": intent["service_name"]}})
@@ -396,48 +440,95 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         for kw in intent.get("keywords", []):
             should_clauses.append({"match": {"body": kw}})
 
-        query = {"bool": {"must": must_clauses}}
+        query = {"bool": {"must": must_clauses}} if must_clauses else {"match_all": {}}
         if should_clauses:
-            query["bool"]["should"] = should_clauses
-            query["bool"]["minimum_should_match"] = 0
+            if "bool" not in query:
+                query = {"bool": {"must": [], "should": should_clauses, "minimum_should_match": 0}}
+            else:
+                query["bool"]["should"] = should_clauses
+                query["bool"]["minimum_should_match"] = 0
 
-        return await es.search(ES_LOG_INDEX, query, size=200)
+        result = await es.search(ES_LOG_INDEX, query, size=200)
+
+        # AUTO-WIDEN: If time-filtered query returned 0 hits, retry without time filter
+        hit_count = result.get("hits", {}).get("total", {}).get("value", 0)
+        if hit_count == 0 and time_range > 0:
+            logger.info(f"Log query returned 0 hits with {time_range}m window, retrying without time filter...")
+            must_clauses_no_time = [c for c in must_clauses if "range" not in c or "timestamp" not in c.get("range", {})]
+            if must_clauses_no_time:
+                query_wide = {"bool": {"must": must_clauses_no_time}}
+            else:
+                query_wide = {"match_all": {}}
+            if should_clauses:
+                if "bool" not in query_wide:
+                    query_wide = {"bool": {"must": [], "should": should_clauses, "minimum_should_match": 0}}
+                else:
+                    query_wide["bool"]["should"] = should_clauses
+                    query_wide["bool"]["minimum_should_match"] = 0
+            result = await es.search(ES_LOG_INDEX, query_wide, size=200)
+            wider_count = result.get("hits", {}).get("total", {}).get("value", 0)
+            logger.info(f"Wider log query found {wider_count} hits")
+
+        return result
 
     async def _query_traces(self, intent: dict) -> dict:
         must_clauses = []
-        time_range = intent.get("time_range_minutes", 60)
-        now = datetime.now(timezone.utc)
-        from_time = (now - timedelta(minutes=time_range)).isoformat()
+        time_range = intent.get("time_range_minutes", 1440)
 
-        must_clauses.append({"range": {"timestamp": {"gte": from_time, "lte": now.isoformat()}}})
+        # time_range_minutes=0 means no time filter (search ALL data)
+        if time_range > 0:
+            now = datetime.now(timezone.utc)
+            from_time = (now - timedelta(minutes=time_range)).isoformat()
+            must_clauses.append({"range": {"timestamp": {"gte": from_time, "lte": now.isoformat()}}})
 
         if intent.get("service_name"):
             must_clauses.append({"term": {"service_name": intent["service_name"]}})
 
         query_type = intent.get("query_type", "general")
         if query_type in ("slowness", "anomaly_detection"):
-            # Look for high-duration spans
             must_clauses.append({"range": {"duration_ms": {"gte": 500}}})
         if query_type == "errors":
             must_clauses.append({"term": {"status_code": "ERROR"}})
 
-        query = {"bool": {"must": must_clauses}}
-        return await es.search(ES_TRACE_INDEX, query, size=200)
+        query = {"bool": {"must": must_clauses}} if must_clauses else {"match_all": {}}
+
+        result = await es.search(ES_TRACE_INDEX, query, size=200)
+
+        # AUTO-WIDEN: If time-filtered query returned 0 hits, retry without time filter
+        hit_count = result.get("hits", {}).get("total", {}).get("value", 0)
+        if hit_count == 0 and time_range > 0:
+            logger.info(f"Trace query returned 0 hits with {time_range}m window, retrying without time filter...")
+            must_clauses_no_time = [c for c in must_clauses if "range" not in c or "timestamp" not in c.get("range", {})]
+            if must_clauses_no_time:
+                query_wide = {"bool": {"must": must_clauses_no_time}}
+            else:
+                query_wide = {"match_all": {}}
+            result = await es.search(ES_TRACE_INDEX, query_wide, size=200)
+            wider_count = result.get("hits", {}).get("total", {}).get("value", 0)
+            logger.info(f"Wider trace query found {wider_count} hits")
+
+        return result
 
     async def _get_service_stats(self, intent: dict) -> dict:
         """Get aggregated stats: error rate, p95 latency, throughput."""
-        time_range = intent.get("time_range_minutes", 60)
-        now = datetime.now(timezone.utc)
-        from_time = (now - timedelta(minutes=time_range)).isoformat()
+        time_range = intent.get("time_range_minutes", 1440)
 
-        filter_clause = [{"range": {"timestamp": {"gte": from_time, "lte": now.isoformat()}}}]
+        filter_clause = []
+        if time_range > 0:
+            now = datetime.now(timezone.utc)
+            from_time = (now - timedelta(minutes=time_range)).isoformat()
+            filter_clause.append({"range": {"timestamp": {"gte": from_time, "lte": now.isoformat()}}})
+
         if intent.get("service_name"):
             filter_clause.append({"term": {"service_name": intent["service_name"]}})
+
+        # Build base query — match_all if no filters
+        base_query = {"bool": {"filter": filter_clause}} if filter_clause else {"match_all": {}}
 
         # Trace stats: latency percentiles, error rate
         trace_agg_body = {
             "size": 0,
-            "query": {"bool": {"filter": filter_clause}},
+            "query": base_query,
             "aggs": {
                 "latency_stats": {
                     "percentiles": {"field": "duration_ms", "percents": [50, 75, 90, 95, 99]}
@@ -467,7 +558,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
         # Log stats: severity breakdown
         log_agg_body = {
             "size": 0,
-            "query": {"bool": {"filter": filter_clause}},
+            "query": base_query,
             "aggs": {
                 "by_severity": {"terms": {"field": "severity", "size": 10}},
                 "error_logs_over_time": {
@@ -677,7 +768,35 @@ async def ws_query(websocket: WebSocket):
 @app.get("/health")
 async def health():
     es_health = await es.health()
-    return {"agent": "ok", "elasticsearch": es_health}
+    log_count = await es.index_count(ES_LOG_INDEX)
+    trace_count = await es.index_count(ES_TRACE_INDEX)
+    return {
+        "agent": "DeepRoot AI",
+        "status": "ok",
+        "elasticsearch": es_health,
+        "indices": {
+            "logs": {"name": ES_LOG_INDEX, "doc_count": log_count},
+            "traces": {"name": ES_TRACE_INDEX, "doc_count": trace_count},
+        },
+    }
+
+
+@app.get("/api/debug")
+async def debug_indices():
+    """Debug endpoint — shows raw data in both indices. Use this to verify ES has your data."""
+    log_result = await es.search(ES_LOG_INDEX, {"match_all": {}}, size=10)
+    trace_result = await es.search(ES_TRACE_INDEX, {"match_all": {}}, size=10)
+
+    log_count = log_result.get("hits", {}).get("total", {}).get("value", 0)
+    trace_count = trace_result.get("hits", {}).get("total", {}).get("value", 0)
+    log_docs = [h["_source"] for h in log_result.get("hits", {}).get("hits", [])]
+    trace_docs = [h["_source"] for h in trace_result.get("hits", {}).get("hits", [])]
+
+    return {
+        "otel_logs": {"total_count": log_count, "sample_docs": log_docs},
+        "otel_traces": {"total_count": trace_count, "sample_docs": trace_docs},
+        "index_names": {"logs": ES_LOG_INDEX, "traces": ES_TRACE_INDEX},
+    }
 
 
 @app.get("/api/services")
@@ -713,10 +832,35 @@ async def list_services():
 
 @app.on_event("startup")
 async def startup():
-    logger.info("OTel Observability Agent starting...")
+    logger.info("=" * 60)
+    logger.info("  DeepRoot AI - Observability Agent Starting...")
+    logger.info("=" * 60)
+    logger.info(f"  Elasticsearch : {ES_HOST}")
+    logger.info(f"  Log Index     : {ES_LOG_INDEX}")
+    logger.info(f"  Trace Index   : {ES_TRACE_INDEX}")
+    logger.info(f"  Ollama        : {OLLAMA_URL}")
+    logger.info(f"  Model         : {OLLAMA_MODEL}")
+    logger.info("-" * 60)
+
+    # Check ES connectivity first
+    es_health = await es.health()
+    if es_health.get("status") == "unreachable":
+        logger.error("❌ Cannot reach Elasticsearch! Check ES_HOST configuration.")
+        logger.error(f"   Tried: {ES_HOST}")
+    else:
+        logger.info(f"✅ Elasticsearch cluster: {es_health.get('cluster_name', 'unknown')} (status: {es_health.get('status', 'unknown')})")
+
+    # Create indices
     await es.ensure_index(ES_LOG_INDEX, LOG_INDEX_MAPPING)
     await es.ensure_index(ES_TRACE_INDEX, TRACE_INDEX_MAPPING)
-    logger.info("Elasticsearch indices ensured. Agent ready.")
+
+    # Verify doc counts
+    log_count = await es.index_count(ES_LOG_INDEX)
+    trace_count = await es.index_count(ES_TRACE_INDEX)
+    logger.info(f"📊 Current data: {log_count} logs, {trace_count} traces")
+    logger.info("=" * 60)
+    logger.info("  DeepRoot AI ready! Open http://localhost:8080")
+    logger.info("=" * 60)
 
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
