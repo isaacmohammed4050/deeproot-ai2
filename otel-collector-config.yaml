@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenTelemetry Collector Configuration
+# This configures your existing otel-collector to ALSO export to the agent.
+# Merge this into your existing collector config.
+# ─────────────────────────────────────────────────────────────────────────────
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+  # Enrich with K8s metadata (if not already present)
+  k8sattributes:
+    auth_type: "serviceAccount"
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.container.name
+        - k8s.deployment.name
+        - k8s.node.name
+
+  # Add resource detection
+  resourcedetection:
+    detectors: [env, system]
+
+exporters:
+  # ── Export logs to OTel Agent ──
+  otlphttp/agent-logs:
+    endpoint: http://otel-agent.observability.svc.cluster.local:8080
+    logs_endpoint: http://otel-agent.observability.svc.cluster.local:8080/v1/logs
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+
+  # ── Export traces to OTel Agent ──
+  otlphttp/agent-traces:
+    endpoint: http://otel-agent.observability.svc.cluster.local:8080
+    traces_endpoint: http://otel-agent.observability.svc.cluster.local:8080/v1/traces
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+
+  # Keep your existing exporters here (e.g., Jaeger, Prometheus, etc.)
+  # debug:
+  #   verbosity: basic
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [k8sattributes, batch]
+      exporters: [otlphttp/agent-logs]   # Add alongside your existing exporters
+
+    traces:
+      receivers: [otlp]
+      processors: [k8sattributes, batch]
+      exporters: [otlphttp/agent-traces]  # Add alongside your existing exporters

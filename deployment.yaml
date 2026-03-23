@@ -1,0 +1,151 @@
+##############################################################################
+# OTel Observability Agent - Kubernetes Manifests
+# Deploy: kubectl apply -f deployment.yaml
+##############################################################################
+
+---
+# ── Namespace (optional, use your existing namespace) ──
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: otel-agent
+
+---
+# ── ConfigMap ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-agent-config
+  namespace: observability
+data:
+  ES_HOST: "http://elasticsearch.observability.svc.cluster.local:9200"
+  ES_LOG_INDEX: "otel-logs"
+  ES_TRACE_INDEX: "otel-traces"
+  OLLAMA_URL: "http://ollama.observability.svc.cluster.local:11434/api/generate"
+  OLLAMA_MODEL: "mistral"
+  LOG_LEVEL: "INFO"
+
+---
+# ── Deployment ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-agent
+  namespace: observability
+  labels:
+    app: otel-agent
+    app.kubernetes.io/name: otel-agent
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otel-agent
+  template:
+    metadata:
+      labels:
+        app: otel-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: otel-agent-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: otel-agent
+          # Replace with your registry/image:tag after docker build & push
+          image: your-registry/otel-agent:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: otel-agent-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+---
+# ── Service ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-agent
+  namespace: observability
+  labels:
+    app: otel-agent
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: otel-agent
+
+---
+# ── ServiceAccount ──
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-agent-sa
+  namespace: observability
+
+---
+# ── Ingress (optional - for external access) ──
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-agent-ingress
+  namespace: observability
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    # Enable WebSocket support
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: otel-agent.your-domain.com  # ← Replace
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: otel-agent
+                port:
+                  number: 8080
