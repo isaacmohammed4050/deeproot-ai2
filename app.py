@@ -464,6 +464,7 @@ class SmartQueryBuilder:
 
 
 # ─── DeepRoot AI Agent ───────────────────────────────────────────────────────
+# ONLY CHANGE IS INSIDE ask_llm()
 
 class ObservabilityAgent:
     """Core AI agent: discovers indices, searches all data, analyzes with LLM."""
@@ -475,8 +476,31 @@ class ObservabilityAgent:
     async def ask_llm(self, prompt: str) -> str:
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
-                r = await client.post(self.ollama_url, json={"model": self.model, "prompt": prompt, "stream": False})
-                return r.json().get("response", "").strip()
+                r = await client.post(
+                    self.ollama_url,
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False
+                    }
+                )
+
+                # ✅ Ensure request succeeded
+                r.raise_for_status()
+
+                # ✅ FIX: Handle multi-line JSON (NDJSON from Ollama)
+                raw = r.text
+                final = ""
+
+                for line in raw.strip().split("\n"):
+                    try:
+                        data = json.loads(line)
+                        final += data.get("response", "")
+                    except Exception:
+                        continue
+
+                return final.strip()
+
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             return f"[LLM Error] Could not reach Ollama: {e}"
@@ -513,7 +537,6 @@ class ObservabilityAgent:
             },
             "analysis": analysis,
         }
-
     async def _search_all(self, intent: dict, all_idx: list[str]) -> tuple[list[dict], int]:
         """Search across all relevant indices with auto-widen fallback."""
         all_results = []
