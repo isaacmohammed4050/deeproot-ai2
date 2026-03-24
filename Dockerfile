@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-LABEL maintainer="Isaac <ishaquerazvi@gmail.com>"
+LABEL maintainer="Isaac <isaacmohammed4050@gmail.com>"
 LABEL description="OTel Observability Agent - AI-powered RCA over OpenTelemetry data"
 
 WORKDIR /app
