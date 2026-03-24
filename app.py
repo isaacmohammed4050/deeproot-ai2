@@ -10,6 +10,7 @@ import os
 import json
 import logging
 import re
+import gzip
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -21,6 +22,8 @@ from pydantic import BaseModel
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 ES_HOST = os.getenv("ES_HOST", "http://elasticsearch:9200")
+ES_USER = os.getenv("ES_USER", "")
+ES_PASSWORD = os.getenv("ES_PASS", os.getenv("ES_PASSWORD", ""))
 ES_LOG_INDEX = os.getenv("ES_LOG_INDEX", "otel-logs")
 ES_TRACE_INDEX = os.getenv("ES_TRACE_INDEX", "otel-traces")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434/api/generate")
@@ -98,9 +101,14 @@ TRACE_FIELDS = ["trace_id", "traceId", "span_id", "spanId", "span_name", "spanNa
 class ESClient:
     """Async Elasticsearch client with automatic index discovery and schema detection."""
 
-    def __init__(self, host: str):
+    def __init__(self, host: str, username: str = "", password: str = ""):
         self.host = host.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=30.0)
+        # Build auth if credentials provided
+        auth = None
+        if username and password:
+            auth = httpx.BasicAuth(username, password)
+            logger.info(f"ES auth enabled for user '{username}'")
+        self.client = httpx.AsyncClient(timeout=30.0, auth=auth, verify=False)
         self.index_meta: dict[str, dict] = {}
 
     async def health(self) -> dict:
@@ -265,7 +273,7 @@ class ESClient:
             logger.error(f"Bulk index failed: {e}")
 
 
-es = ESClient(ES_HOST)
+es = ESClient(ES_HOST, ES_USER, ES_PASSWORD)
 
 
 # ─── OTLP Receiver ───────────────────────────────────────────────────────────
@@ -667,9 +675,34 @@ agent = ObservabilityAgent()
 
 # ─── OTLP Endpoints ──────────────────────────────────────────────────────────
 
+async def _parse_request_body(request: Request) -> dict:
+    """Parse request body, auto-detecting and decompressing gzip if needed."""
+    raw = await request.body()
+    # Check for gzip magic bytes (1f 8b)
+    if len(raw) >= 2 and raw[0] == 0x1f and raw[1] == 0x8b:
+        try:
+            raw = gzip.decompress(raw)
+            logger.debug("Decompressed gzip payload")
+        except Exception as e:
+            logger.error(f"Gzip decompression failed: {e}")
+            raise
+    # Also handle Content-Encoding header
+    elif request.headers.get("content-encoding", "").lower() == "gzip":
+        try:
+            raw = gzip.decompress(raw)
+        except Exception as e:
+            logger.error(f"Gzip decompression (header) failed: {e}")
+            raise
+    return json.loads(raw)
+
+
 @app.post("/v1/logs")
 async def receive_logs(request: Request):
-    payload = await request.json()
+    try:
+        payload = await _parse_request_body(request)
+    except Exception as e:
+        logger.error(f"Failed to parse log payload: {e}")
+        return {"status": "error", "message": str(e)}
     docs = parse_otlp_logs(payload)
     await es.bulk_index(ES_LOG_INDEX, docs)
     logger.info(f"Ingested {len(docs)} logs → '{ES_LOG_INDEX}'")
@@ -677,7 +710,11 @@ async def receive_logs(request: Request):
 
 @app.post("/v1/traces")
 async def receive_traces(request: Request):
-    payload = await request.json()
+    try:
+        payload = await _parse_request_body(request)
+    except Exception as e:
+        logger.error(f"Failed to parse trace payload: {e}")
+        return {"status": "error", "message": str(e)}
     docs = parse_otlp_traces(payload)
     await es.bulk_index(ES_TRACE_INDEX, docs)
     logger.info(f"Ingested {len(docs)} traces → '{ES_TRACE_INDEX}'")
