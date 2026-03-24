@@ -16,8 +16,6 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -33,8 +31,6 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL), format="%(asctime)s [%(le
 logger = logging.getLogger("deeproot-ai")
 
 app = FastAPI(title="DeepRoot AI", version="2.0.0", description="AI-powered observability agent — flexible across all ES indices")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
 
 # ─── Elasticsearch Index Templates (used ONLY for OTLP pipeline ingestion) ───
 
@@ -833,4 +829,141 @@ async def startup():
 
 @app.get("/", response_class=HTMLResponse)
 async def ui(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return HTMLResponse(content=UI_HTML)
+
+
+# ─── Embedded UI HTML (no external files needed) ─────────────────────────────
+
+UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>DeepRoot AI - Observability Agent</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--bg0:#0a0e17;--bg1:#111827;--bg2:#1a2234;--bg3:#0f1623;--bd:#1e2d45;--bdf:#3b82f6;--t1:#e2e8f0;--t2:#8899b4;--t3:#4a5e7a;--ac:#3b82f6;--acg:rgba(59,130,246,.15);--gn:#10b981;--rd:#ef4444;--cy:#06b6d4}
+        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:'DM Sans',sans-serif;background:var(--bg0);color:var(--t1);min-height:100vh;display:flex;flex-direction:column}
+        header{padding:16px 24px;border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;background:var(--bg1)}
+        .logo{display:flex;align-items:center;gap:12px}
+        .logo-icon{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--ac),var(--cy));display:flex;align-items:center;justify-content:center;font-size:18px}
+        .logo h1{font-size:16px;font-weight:600}
+        .logo span{font-size:12px;color:var(--t3);font-family:'JetBrains Mono',monospace}
+        .status-badge{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);padding:6px 12px;border-radius:20px;border:1px solid var(--bd);background:var(--bg2)}
+        .status-dot{width:7px;height:7px;border-radius:50%;background:var(--gn);animation:pulse 2s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+        .container{flex:1;display:flex;flex-direction:column;max-width:960px;width:100%;margin:0 auto;padding:24px}
+        .chat-area{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:20px;padding-bottom:24px}
+        .welcome{text-align:center;padding:60px 20px}
+        .welcome h2{font-size:22px;font-weight:600;margin-bottom:8px}
+        .welcome p{color:var(--t2);font-size:14px;line-height:1.6;max-width:500px;margin:0 auto 24px}
+        .suggestions{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+        .suggestion{padding:8px 16px;border:1px solid var(--bd);border-radius:20px;font-size:13px;color:var(--t2);cursor:pointer;background:var(--bg2);transition:all .2s;font-family:'DM Sans',sans-serif}
+        .suggestion:hover{border-color:var(--ac);color:var(--ac);background:var(--acg)}
+        .message{display:flex;gap:12px;animation:fadeUp .3s ease}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        .message.user{justify-content:flex-end}
+        .message.user .msg-content{background:var(--ac);color:#fff;border-radius:16px 16px 4px 16px;max-width:70%}
+        .msg-avatar{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;background:var(--bg2);border:1px solid var(--bd)}
+        .message.user .msg-avatar{display:none}
+        .msg-content{padding:12px 16px;border-radius:4px 16px 16px 16px;background:var(--bg2);border:1px solid var(--bd);font-size:14px;line-height:1.65;max-width:85%}
+        .msg-content p{margin-bottom:8px}.msg-content p:last-child{margin-bottom:0}
+        .msg-content strong{color:var(--ac);font-weight:600}
+        .msg-content ul,.msg-content ol{padding-left:18px;margin:6px 0}
+        .msg-content li{margin:4px 0}
+        .msg-content code{font-family:'JetBrains Mono',monospace;background:rgba(255,255,255,.06);padding:2px 6px;border-radius:4px;font-size:12px}
+        .status-msg{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:12px;color:var(--t3);font-family:'JetBrains Mono',monospace;animation:fadeUp .2s ease}
+        .status-msg .spinner{width:14px;height:14px;border:2px solid var(--bd);border-top-color:var(--ac);border-radius:50%;animation:spin .8s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .data-summary{display:flex;gap:12px;padding:4px 0;animation:fadeUp .2s ease;flex-wrap:wrap}
+        .data-card{padding:10px 16px;border-radius:10px;border:1px solid var(--bd);background:var(--bg2);font-family:'JetBrains Mono',monospace;font-size:12px}
+        .data-card .label{color:var(--t3);margin-bottom:2px}.data-card .value{font-size:20px;font-weight:600;color:var(--cy)}
+        .input-area{padding-top:16px;border-top:1px solid var(--bd)}
+        .input-row{display:flex;gap:8px;align-items:flex-end}
+        .input-row textarea{flex:1;padding:14px 16px;border:1px solid var(--bd);border-radius:14px;background:var(--bg3);color:var(--t1);font-family:'DM Sans',sans-serif;font-size:14px;resize:none;outline:none;min-height:48px;max-height:120px;transition:border-color .2s;line-height:1.5}
+        .input-row textarea:focus{border-color:var(--ac);box-shadow:0 0 0 3px var(--acg)}
+        .input-row textarea::placeholder{color:var(--t3)}
+        .send-btn{width:48px;height:48px;border-radius:14px;border:none;background:var(--ac);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0}
+        .send-btn:hover{background:#2563eb;transform:scale(1.04)}.send-btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+        .send-btn svg{width:20px;height:20px}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo"><div class="logo-icon">&#x2B22;</div><div><h1>DeepRoot AI</h1><span>observability x intelligence</span></div></div>
+        <div class="status-badge" id="statusBadge"><div class="status-dot"></div><span>Connecting...</span></div>
+    </header>
+    <div class="container">
+        <div class="chat-area" id="chatArea">
+            <div class="welcome" id="welcome">
+                <h2>DeepRoot AI &mdash; What's happening in your cluster?</h2>
+                <p>Ask about your services in plain English. I'll search logs and traces across ALL Elasticsearch indices, detect anomalies, and run root cause analysis powered by AI.</p>
+                <div class="suggestions">
+                    <button class="suggestion" onclick="useSuggestion(this)">Show me all data in elasticsearch</button>
+                    <button class="suggestion" onclick="useSuggestion(this)">Is there any spike in user-management-service?</button>
+                    <button class="suggestion" onclick="useSuggestion(this)">Show me errors across all indices</button>
+                    <button class="suggestion" onclick="useSuggestion(this)">Which service has the highest latency?</button>
+                </div>
+            </div>
+        </div>
+        <div class="input-area">
+            <div class="input-row">
+                <textarea id="queryInput" placeholder="Ask about your services... e.g. 'Any errors in order-service?'" rows="1" onkeydown="handleKey(event)"></textarea>
+                <button class="send-btn" id="sendBtn" onclick="sendQuery()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
+            </div>
+        </div>
+    </div>
+<script>
+let ws, isProcessing=false;
+function connectWS(){
+    const p=location.protocol==='https:'?'wss:':'ws:';
+    ws=new WebSocket(p+'//'+location.host+'/ws/query');
+    ws.onopen=()=>{document.querySelector('#statusBadge span').textContent='Connected';document.querySelector('.status-dot').style.background='var(--gn)'};
+    ws.onclose=()=>{document.querySelector('#statusBadge span').textContent='Disconnected';document.querySelector('.status-dot').style.background='var(--rd)';setTimeout(connectWS,3000)};
+    ws.onmessage=(e)=>handleWSMessage(JSON.parse(e.data));
+}
+function handleWSMessage(msg){
+    const chat=document.getElementById('chatArea');
+    if(msg.type==='status'){
+        const prev=chat.querySelector('.status-msg:last-of-type');if(prev)prev.remove();
+        const el=document.createElement('div');el.className='status-msg';
+        el.innerHTML='<div class="spinner"></div><span>'+msg.message+'</span>';chat.appendChild(el);
+    } else if(msg.type==='data_summary'){
+        const el=document.createElement('div');el.className='data-summary';let cards='';
+        if(msg.data.total_hits!==undefined){
+            cards+='<div class="data-card"><div class="label">Total Hits</div><div class="value">'+msg.data.total_hits.toLocaleString()+'</div></div>';
+            if(msg.data.indices){for(const[idx,count]of Object.entries(msg.data.indices)){cards+='<div class="data-card"><div class="label">'+idx+'</div><div class="value">'+count.toLocaleString()+'</div></div>';}}
+        }
+        el.innerHTML=cards;chat.appendChild(el);
+    } else if(msg.type==='result'){
+        chat.querySelectorAll('.status-msg').forEach(e=>e.remove());
+        addMessage('agent',msg.data.analysis);isProcessing=false;
+        document.getElementById('sendBtn').disabled=false;document.getElementById('queryInput').focus();
+    }
+    chat.scrollTop=chat.scrollHeight;
+}
+function addMessage(role,text){
+    const chat=document.getElementById('chatArea'),w=document.getElementById('welcome');if(w)w.style.display='none';
+    const div=document.createElement('div');div.className='message '+role;
+    let html=text.replace(/\\*\\*(.*?)\\*\\*/g,'<strong>$1</strong>').replace(/`(.*?)`/g,'<code>$1</code>')
+        .replace(/^### (.+)$/gm,'<p><strong>$1</strong></p>').replace(/^## (.+)$/gm,'<p><strong>$1</strong></p>')
+        .replace(/^- (.+)$/gm,'&bull; $1<br>').replace(/\\n\\n/g,'</p><p>').replace(/\\n/g,'<br>');
+    html='<p>'+html+'</p>';
+    div.innerHTML=role==='agent'?'<div class="msg-avatar">&#x2B22;</div><div class="msg-content">'+html+'</div>':'<div class="msg-content">'+text+'</div>';
+    chat.appendChild(div);chat.scrollTop=chat.scrollHeight;
+}
+function sendQuery(){
+    const input=document.getElementById('queryInput'),q=input.value.trim();if(!q||isProcessing)return;
+    isProcessing=true;document.getElementById('sendBtn').disabled=true;addMessage('user',q);input.value='';input.style.height='auto';
+    if(ws&&ws.readyState===WebSocket.OPEN){ws.send(JSON.stringify({query:q}))}
+    else{fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})})
+        .then(r=>r.json()).then(d=>{addMessage('agent',d.analysis);isProcessing=false;document.getElementById('sendBtn').disabled=false})
+        .catch(e=>{addMessage('agent','Error: '+e.message);isProcessing=false;document.getElementById('sendBtn').disabled=false})}
+}
+function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendQuery()}const t=e.target;setTimeout(()=>{t.style.height='auto';t.style.height=t.scrollHeight+'px'},0)}
+function useSuggestion(btn){document.getElementById('queryInput').value=btn.textContent;sendQuery()}
+connectWS();
+</script>
+</body>
+</html>"""
