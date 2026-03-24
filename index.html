@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OTel Observability Agent</title>
+    <title> 🧠 DeepRoot AI - Observability Agent</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -232,6 +232,7 @@
             gap: 12px;
             padding: 4px 0;
             animation: fadeUp 0.2s ease;
+            flex-wrap: wrap;
         }
         .data-card {
             padding: 10px 16px;
@@ -297,10 +298,10 @@
 <body>
     <header>
         <div class="logo">
-            <div class="logo-icon">◈</div>
+            <div class="logo-icon">⌬</div>
             <div>
-                <h1>OTel Agent</h1>
-                <span>observability × ai</span>
+                <h1> 🧠 DeepRoot AI </h1>
+                <span>observability × intelligence</span>
             </div>
         </div>
         <div class="status-badge" id="statusBadge">
@@ -312,11 +313,12 @@
     <div class="container">
         <div class="chat-area" id="chatArea">
             <div class="welcome" id="welcome">
-                <h2>What's happening in your cluster?</h2>
-                <p>Ask about your services in plain English. I'll search logs and traces, detect anomalies, and run root cause analysis.</p>
+                <h2>DeepRoot AI — What's happening in your cluster?</h2>
+                <p>Ask about your services in plain English. I'll search logs and traces in Elasticsearch, detect anomalies, and run root cause analysis powered by AI.</p>
                 <div class="suggestions">
+                    <button class="suggestion" onclick="useSuggestion(this)">Show me all data in elasticsearch</button>
                     <button class="suggestion" onclick="useSuggestion(this)">Is there any spike in user-management-service?</button>
-                    <button class="suggestion" onclick="useSuggestion(this)">Show me errors in the last 30 minutes</button>
+                    <button class="suggestion" onclick="useSuggestion(this)">Show me errors across all indices</button>
                     <button class="suggestion" onclick="useSuggestion(this)">Which service has the highest latency?</button>
                     <button class="suggestion" onclick="useSuggestion(this)">Any slowness in payment-service?</button>
                 </div>
@@ -373,10 +375,19 @@
             else if (msg.type === 'data_summary') {
                 const el = document.createElement('div');
                 el.className = 'data-summary';
-                el.innerHTML = `
-                    <div class="data-card"><div class="label">Logs Found</div><div class="value">${msg.data.logs_found.toLocaleString()}</div></div>
-                    <div class="data-card"><div class="label">Traces Found</div><div class="value">${msg.data.traces_found.toLocaleString()}</div></div>
-                `;
+                let cards = '';
+                if (msg.data.total_hits !== undefined) {
+                    cards += `<div class="data-card"><div class="label">Total Hits</div><div class="value">${msg.data.total_hits.toLocaleString()}</div></div>`;
+                    if (msg.data.indices) {
+                        for (const [idx, count] of Object.entries(msg.data.indices)) {
+                            cards += `<div class="data-card"><div class="label">${idx}</div><div class="value">${count.toLocaleString()}</div></div>`;
+                        }
+                    }
+                } else {
+                    cards = `<div class="data-card"><div class="label">Logs</div><div class="value">${(msg.data.logs_found||0).toLocaleString()}</div></div>
+                             <div class="data-card"><div class="label">Traces</div><div class="value">${(msg.data.traces_found||0).toLocaleString()}</div></div>`;
+                }
+                el.innerHTML = cards;
                 chat.appendChild(el);
             }
             else if (msg.type === 'result') {
@@ -412,7 +423,7 @@
             html = `<p>${html}</p>`;
 
             if (role === 'agent') {
-                div.innerHTML = `<div class="msg-avatar">◈</div><div class="msg-content">${html}</div>`;
+                div.innerHTML = `<div class="msg-avatar">⌬</div><div class="msg-content">${html}</div>`;
             } else {
                 div.innerHTML = `<div class="msg-content">${text}</div>`;
             }
